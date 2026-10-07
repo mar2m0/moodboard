@@ -52,10 +52,13 @@
   .new-form { display: flex; gap: 8px; margin-bottom: 28px; }
   .grid { list-style: none; padding: 0; margin: 0; display: grid; gap: 20px;
           grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-  .card { position: relative; border: 1px solid var(--line); border-radius: 12px;
-          overflow: hidden; background: #fff; text-decoration: none; display: block; }
-  .card:hover { border-color: var(--muted); }
-  .thumbs { aspect-ratio: 4/3; display: grid; grid-template-columns: 1fr 1fr;
+  /* The frame belongs to the whole card so the actions sit inside it, not
+     orphaned underneath. */
+  .grid > li { border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+               background: #fff; }
+  .grid > li:hover { border-color: var(--muted); }
+  .card { position: relative; text-decoration: none; display: block; }
+  .thumbs { aspect-ratio: 1; display: grid; grid-template-columns: 1fr 1fr;
             grid-template-rows: 1fr 1fr; gap: 1px; background: #f0ece5; }
   .thumbs img { width: 100%; height: 100%; object-fit: cover; display: block; }
   /* Fill the tile whatever the count is, instead of leaving empty cells. */
@@ -64,15 +67,25 @@
   .thumbs.n3 img:first-child { grid-row: span 2; }
   .thumbs .empty { grid-column: span 2; grid-row: span 2; display: grid;
                    place-items: center; color: #cfc8bd; font-size: 12px; }
-  .card-body { padding: 12px 14px; }
+  .card-body { padding: 12px 14px 8px; }
   .card-title { font-size: 14px; font-weight: 600; margin: 0;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-meta { font-size: 12px; color: var(--muted); margin: 3px 0 0; }
-  .card-del { position: absolute; top: 8px; right: 8px; display: none;
-              background: rgba(255,255,255,.94); border: 1px solid var(--line);
-              border-radius: 6px; padding: 3px 8px; font-size: 11px; }
-  li:hover .card-del { display: block; }
-  .card-del:hover { color: #c0392b; }
+  /* Always visible: a hover-only control is a control most people never find. */
+  .card-actions { display: flex; align-items: center; gap: 8px; padding: 0 14px 12px; }
+  .card-act { background: none; border: 0; padding: 2px 0; font-size: 12px;
+              color: var(--muted); font-family: inherit; white-space: nowrap; }
+  .card-act:hover { color: var(--ink); text-decoration: underline; }
+  .card-act.del:hover { color: #c0392b; }
+  .card-actions .dot { color: var(--line); font-size: 11px; }
+  input.rename { font: inherit; font-size: 14px; font-weight: 600; width: 100%;
+            border: 1px solid var(--ink); border-radius: 5px; padding: 2px 6px;
+            margin: -3px 0; background: #fff; outline: none; }
+  h2#boardTitle { cursor: text; }
+  h2#boardTitle:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+  input.titleEdit { font: inherit; font-size: 14px; font-weight: 600; border: 1px solid var(--ink);
+               border-radius: 6px; padding: 3px 8px; background: #fff; outline: none;
+               min-width: 220px; }
   .empty-note { border: 1px dashed var(--line); border-radius: 12px; padding: 64px 24px;
                 text-align: center; color: #b5ada1; font-size: 13px; }
 
@@ -787,9 +800,21 @@ async function renderHome() {
           '<p class="card-meta">' + items.length + "개 · " + fmtDate(board.updatedAt) + "</p>" +
         "</div>" +
       "</a>" +
-      '<button class="card-del">삭제</button>';
+      '<div class="card-actions">' +
+        '<button class="card-act rename">이름 수정</button>' +
+        '<span class="dot">·</span>' +
+        '<button class="card-act del">삭제</button>' +
+      "</div>";
 
-    li.querySelector(".card-del").addEventListener("click", async (event) => {
+    li.querySelector(".card-act.rename").addEventListener("click", (event) => {
+      event.preventDefault();
+      const title = li.querySelector(".card-title");
+      editInline(title, board.title, "rename", async (next) => {
+        if (next !== null && await renameBoard(board.id, board.title, next)) await renderHome();
+      });
+    });
+
+    li.querySelector(".card-act.del").addEventListener("click", async (event) => {
       event.preventDefault();
       if (!confirm("'" + board.title + "' 보드를 삭제할까요? 안에 있는 이미지와 메모도 함께 사라집니다.\n\n실수로 지웠다면 Ctrl/⌘+Z 로 되돌릴 수 있습니다.")) return;
       const rows = (await itemsOfBoard(board.id)).map(snapshot);
@@ -1226,6 +1251,7 @@ async function refreshView() {
   if (boardId) {
     const board = await get("boards", boardId);
     if (!board) { location.hash = "#/"; return; }
+    $("boardTitle").textContent = board.title;
     items = (await itemsOfBoard(boardId)).sort((a, b) => a.z - b.z);
     const live = new Set(items.map((i) => i.id));
     for (const id of [...selection]) if (!live.has(id)) selection.delete(id);
@@ -1286,6 +1312,60 @@ async function applyPatch(id, patch) {
   if (!row) return;
   Object.assign(row, patch);
   await put("items", row);
+}
+
+async function applyBoardPatch(id, patch) {
+  const row = await get("boards", id);
+  if (!row) return;
+  Object.assign(row, patch);
+  await put("boards", row);
+}
+
+/** Saves a new board name and makes the change undoable. */
+async function renameBoard(id, before, after) {
+  const title = after.trim().slice(0, 120);
+  if (!title || title === before) return false;
+  await applyBoardPatch(id, { title });
+  scheduleSync();
+  record({
+    label: "보드 이름",
+    undo: () => applyBoardPatch(id, { title: before }),
+    redo: () => applyBoardPatch(id, { title }),
+  });
+  return true;
+}
+
+/**
+ * Swaps an element for a text box holding the same words. Enter or losing
+ * focus keeps the edit, Escape drops it.
+ */
+function editInline(host, value, className, commit) {
+  const input = document.createElement("input");
+  input.className = className;
+  input.value = value;
+  input.maxLength = 120;
+  let settled = false;
+
+  // The card is a link; a click inside the editor must not follow it.
+  input.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); });
+  input.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+  const finish = async (keep) => {
+    if (settled) return;
+    settled = true;
+    const next = input.value;
+    input.replaceWith(host);
+    await commit(keep ? next : null);
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); finish(true); }
+    if (event.key === "Escape") { event.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+
+  host.replaceWith(input);
+  input.focus();
+  input.select();
 }
 
 function recordPatch(id, before, after, label) {
@@ -2202,24 +2282,8 @@ async function captureBoardImage() {
   }
   const shots = xs.length * ys.length;
 
-  if (shots > 1) {
-    const ok = confirm(
-      "선명하게 담으려고 보드를 " + Math.round(target * 100) + "% 로 키워 " + shots +
-      "번에 나눠 찍습니다.\n\n" +
-      "찍는 동안 화면이 움직입니다 — 건드리지 말고 기다려 주세요.\n\n" +
-      "계속할까요?");
-    if (!ok) { notify("캡처를 취소했습니다"); return; }
-  }
-
-  const beforeZoom = zoom;
-  const beforeLeft = view.scrollLeft;
-  const beforeTop = view.scrollTop;
-
-  zoom = target;
-  applyZoom();
-  document.body.classList.add("capturing");
-  await nextFrame();
-
+  // Ask for the screen first. getDisplayMedia needs the activation from the
+  // click that got us here, and a dialog or an awaited frame spends it.
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
@@ -2229,13 +2293,19 @@ async function captureBoardImage() {
       selfBrowserSurface: "include",
     });
   } catch (err) {
-    document.body.classList.remove("capturing");
-    zoom = beforeZoom;
-    applyZoom();
-    view.scrollTo(beforeLeft, beforeTop);
     notify(err && err.name === "NotAllowedError" ? "캡처를 취소했습니다" : "캡처를 시작하지 못했습니다");
     return;
   }
+
+  const beforeZoom = zoom;
+  const beforeLeft = view.scrollLeft;
+  const beforeTop = view.scrollTop;
+
+  if (shots > 1) notify(Math.round(target * 100) + "% 로 키워 " + shots + "번에 나눠 찍습니다…");
+  zoom = target;
+  applyZoom();
+  document.body.classList.add("capturing");
+  await nextFrame();
 
   try {
     const video = document.createElement("video");
@@ -2406,6 +2476,17 @@ $("newBoard").addEventListener("submit", async (event) => {
   scheduleSync();
   $("newTitle").value = "";
   location.hash = "#/board/" + board.id;
+});
+
+$("boardTitle").title = "눌러서 이름 바꾸기";
+$("boardTitle").addEventListener("click", () => {
+  if (!boardId) return;
+  const heading = $("boardTitle");
+  const current = heading.textContent;
+  editInline(heading, current, "titleEdit", async (next) => {
+    if (next === null) return;
+    if (await renameBoard(boardId, current, next)) heading.textContent = next.trim().slice(0, 120);
+  });
 });
 
 $("btnZoomIn").addEventListener("click", () => stepZoom(1));
